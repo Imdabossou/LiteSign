@@ -1,0 +1,23 @@
+services:
+  litesign:
+    build: .
+    # Or, once you've pushed/pulled an image, replace `build: .` with `image: yourname/litesign:latest`
+    container_name: litesign
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
+      - BASE_URL=${BASE_URL:-http://localhost:8080}
+      - TRUST_PROXY=${TRUST_PROXY:-1}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+    volumes:
+      - litesign_data:/app/data
+
+volumes:
+  litesign_data:

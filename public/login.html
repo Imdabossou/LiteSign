@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Lite Sign — Login</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="card login-card">
+      <h2 style="margin-top:0">Lite<span style="color:var(--accent)">Sign</span></h2>
+      <div class="field-row">
+        <label>Admin password</label>
+        <input type="password" id="password" placeholder="Enter password" autofocus />
+      </div>
+      <button class="btn" id="loginBtn" style="width:100%">Log in</button>
+      <div class="error-msg" id="err"></div>
+    </div>
+  </div>
+  <script>
+    async function doLogin() {
+      const password = document.getElementById('password').value;
+      const res = await fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ password }) });
+      if (res.ok) { window.location.href = '/index.html'; }
+      else { document.getElementById('err').textContent = 'Incorrect password'; }
+    }
+    document.getElementById('loginBtn').addEventListener('click', doLogin);
+    document.getElementById('password').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+  </script>
+</body>
+</html>

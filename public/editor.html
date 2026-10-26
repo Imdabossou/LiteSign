@@ -2,299 +2,74 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Lite Sign — Editor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
 <link rel="stylesheet" href="/style.css" />
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.js"></script>
+<title>Document — LiteSign</title>
+<script type="module" src="/js/editor.js"></script>
 </head>
 <body>
-  <div class="topbar">
-    <div class="brand"><a href="/index.html" style="color:inherit">Lite<span>Sign</span></a></div>
-    <div>
-      <span id="docTitleTop" style="font-weight:600; margin-right:16px;"></span>
-      <button class="btn secondary" id="logoutBtn">Log out</button>
-    </div>
-  </div>
-  <div class="container" style="max-width: 1200px;">
+  <header class="topbar">
+    <a class="brand" href="/">Lite<span>Sign</span></a>
+    <div class="topbar-title" id="docTitleTop"></div>
+    <button class="btn secondary" id="logoutBtn">Log out</button>
+  </header>
+  <main class="container wide">
+    <a class="back-link" href="/">← All documents</a>
     <div id="statusBanner"></div>
     <div class="editor-layout">
-      <div class="editor-sidebar">
-        <div class="card" id="signerCard">
-          <h4 style="margin-top:0">Signers</h4>
+      <aside class="editor-sidebar">
+        <section class="card">
+          <h3>Signers</h3>
           <div id="signerList"></div>
-          <div id="addSignerForm">
+          <form id="addSignerForm" class="add-signer" hidden>
             <div class="field-row">
-              <label>Name</label>
-              <input id="signerName" placeholder="Jane Doe" />
+              <label for="signerName">Name</label>
+              <input id="signerName" maxlength="200" placeholder="Jane Doe" required />
             </div>
             <div class="field-row">
-              <label>Email (optional)</label>
-              <input id="signerEmail" placeholder="jane@example.com" />
+              <label for="signerEmail">Email <span class="optional">(optional)</span></label>
+              <input id="signerEmail" type="email" maxlength="254" placeholder="jane@example.com" />
             </div>
-            <button class="btn secondary" id="addSignerBtn" style="width:100%">+ Add signer</button>
-          </div>
-        </div>
+            <button class="btn secondary block" type="submit">+ Add signer</button>
+          </form>
+        </section>
 
-        <div class="card" id="fieldTypeCard">
-          <h4 style="margin-top:0">Add a field</h4>
-          <p class="hint">Select a signer above, pick a field type, then click on the document where it should go.</p>
-          <div class="field-row">
-            <label>Field type</label>
-            <select id="fieldType">
-              <option value="signature">Signature</option>
-              <option value="initials">Initials</option>
-              <option value="text">Text</option>
-              <option value="date">Date</option>
-            </select>
+        <section class="card" id="fieldCard" hidden>
+          <h3>Add fields</h3>
+          <p class="hint" id="fieldHint">Pick a signer above, choose a field, then click on the document to place it. Drag fields to move them; drag the corner to resize.</p>
+          <div class="field-buttons" id="fieldButtons">
+            <button class="btn secondary" data-type="signature">✍️ Signature</button>
+            <button class="btn secondary" data-type="initials">AB Initials</button>
+            <button class="btn secondary" data-type="text">T Text</button>
+            <button class="btn secondary" data-type="date">📅 Date</button>
           </div>
-          <button class="btn" id="placeModeBtn" style="width:100%">Click to place field</button>
-          <p class="hint" id="placeHint"></p>
-        </div>
+        </section>
 
-        <div class="card">
-          <div id="smtpNotice" class="hint" style="margin-bottom:8px;"></div>
+        <section class="card" id="sendCard" hidden>
+          <h3>Send</h3>
+          <p class="hint" id="smtpNotice"></p>
           <div class="field-row">
-            <label>Note to include in the email (optional)</label>
-            <input id="sendNote" placeholder="e.g. Please sign by Friday" />
+            <label for="sendNote">Note for the email <span class="optional">(optional)</span></label>
+            <textarea id="sendNote" rows="2" maxlength="1000" placeholder="e.g. Please sign by Friday"></textarea>
           </div>
-          <button class="btn" id="sendBtn" style="width:100%">Send for signing</button>
-          <div id="linksBox" style="margin-top:12px;"></div>
-        </div>
-      </div>
+          <button class="btn block" id="sendBtn">Send for signing</button>
+        </section>
+
+        <section class="card" id="actionsCard" hidden>
+          <div id="actions"></div>
+        </section>
+
+        <details class="card" id="auditCard" hidden>
+          <summary><h3>Audit trail</h3></summary>
+          <ol class="audit" id="auditList"></ol>
+        </details>
+      </aside>
 
       <div class="editor-canvas-wrap" id="canvasWrap">
         <div class="empty">Loading document…</div>
       </div>
     </div>
-  </div>
-
-  <script>
-    const params = new URLSearchParams(window.location.search);
-    const docId = params.get('doc');
-    let doc = null;
-    let activeSignerId = null;
-    let placing = false;
-    let placeType = 'signature';
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.js';
-
-    async function checkAuth() {
-      const r = await fetch('/api/session');
-      const d = await r.json();
-      if (!d.authed) window.location.href = '/login.html';
-    }
-
-    function escapeHtml(s) {
-      return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-    }
-
-    async function loadDoc() {
-      const res = await fetch('/api/documents/' + docId);
-      doc = await res.json();
-      document.getElementById('docTitleTop').textContent = doc.title;
-      renderBanner();
-      renderSigners();
-      const editable = doc.status === 'draft';
-      document.getElementById('fieldTypeCard').style.display = editable ? '' : 'none';
-      document.getElementById('addSignerForm').style.display = editable ? '' : 'none';
-      document.getElementById('sendBtn').style.display = editable ? '' : 'none';
-      await renderPdf();
-    }
-
-    function renderBanner() {
-      const el = document.getElementById('statusBanner');
-      if (doc.status === 'pending') {
-        el.innerHTML = `<div class="status-banner pending">Sent for signing — waiting on ${doc.signers.filter(s=>s.status!=='signed').length} of ${doc.signers.length} signer(s).</div>`;
-      } else if (doc.status === 'completed') {
-        el.innerHTML = `<div class="status-banner completed">All signers have signed. <a href="/api/documents/${doc.id}/download">Download the signed PDF</a>.</div>`;
-      } else {
-        el.innerHTML = '';
-      }
-    }
-
-    function renderSigners() {
-      const el = document.getElementById('signerList');
-      if (doc.signers.length === 0) { el.innerHTML = '<p class="hint">No signers yet.</p>'; return; }
-      el.innerHTML = doc.signers.map(s => `
-        <div class="signer-chip ${s.id === activeSignerId ? 'active' : ''}" data-id="${s.id}">
-          <span>${escapeHtml(s.name)}${s.email ? ' <span class="hint" style="display:inline">(' + escapeHtml(s.email) + ')</span>' : ''} ${s.status === 'signed' ? '✅' : ''}</span>
-          <span>
-            ${doc.status === 'draft' ? `<button class="btn secondary small-btn" onclick="selectSigner('${s.id}')">Select</button>
-            <button class="btn danger small-btn" onclick="removeSigner('${s.id}')">✕</button>` : ''}
-            ${doc.status === 'pending' && s.status !== 'signed' && s.email ? `<button class="btn secondary small-btn" onclick="resendEmail('${s.id}')">Resend email</button>` : ''}
-          </span>
-        </div>`).join('');
-      if (!activeSignerId && doc.signers.length && doc.status === 'draft') selectSigner(doc.signers[0].id);
-    }
-
-    window.resendEmail = async function(signerId) {
-      const res = await fetch(`/api/signers/${signerId}/resend`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({}) });
-      const data = await res.json();
-      if (!res.ok) { alert((data.error || 'Could not send email') + (data.url ? '\n\nLink: ' + data.url : '')); return; }
-      alert('Email resent.');
-    };
-
-    function selectSigner(id) { activeSignerId = id; renderSigners(); }
-
-    window.selectSigner = selectSigner;
-    window.removeSigner = async function(id) {
-      await fetch('/api/signers/' + id, { method: 'DELETE' });
-      await loadDoc();
-    };
-
-    document.getElementById('addSignerBtn').addEventListener('click', async () => {
-      const name = document.getElementById('signerName').value.trim();
-      if (!name) return;
-      const email = document.getElementById('signerEmail').value.trim();
-      const res = await fetch(`/api/documents/${docId}/signers`, {
-        method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ name, email })
-      });
-      const data = await res.json();
-      document.getElementById('signerName').value = '';
-      document.getElementById('signerEmail').value = '';
-      await loadDoc();
-      selectSigner(data.id);
-    });
-
-    document.getElementById('placeModeBtn').addEventListener('click', () => {
-      if (!activeSignerId) { alert('Select a signer first.'); return; }
-      placeType = document.getElementById('fieldType').value;
-      placing = !placing;
-      document.getElementById('placeModeBtn').textContent = placing ? 'Cancel placing' : 'Click to place field';
-      document.getElementById('placeHint').textContent = placing ? 'Now click on the document below.' : '';
-    });
-
-    async function renderPdf() {
-      const wrap = document.getElementById('canvasWrap');
-      wrap.innerHTML = '';
-      const pdf = await pdfjsLib.getDocument('/api/documents/' + docId + '/file').promise;
-      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-        const page = await pdf.getPage(pageNum);
-        const scale = 1.3;
-        const viewport = page.getViewport({ scale });
-        const pageWrap = document.createElement('div');
-        pageWrap.className = 'pdf-page-wrap';
-        pageWrap.style.width = viewport.width + 'px';
-        pageWrap.style.height = viewport.height + 'px';
-        pageWrap.dataset.page = pageNum - 1;
-        pageWrap.dataset.width = viewport.width;
-        pageWrap.dataset.height = viewport.height;
-
-        const canvas = document.createElement('canvas');
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        const ctx = canvas.getContext('2d');
-        await page.render({ canvasContext: ctx, viewport }).promise;
-        pageWrap.appendChild(canvas);
-
-        pageWrap.addEventListener('click', onPageClick);
-        wrap.appendChild(pageWrap);
-      }
-      renderFieldBoxes();
-    }
-
-    function renderFieldBoxes() {
-      document.querySelectorAll('.field-box').forEach(el => el.remove());
-      const wraps = document.querySelectorAll('.pdf-page-wrap');
-      doc.fields.forEach(f => {
-        const pageWrap = wraps[f.page];
-        if (!pageWrap) return;
-        const w = parseFloat(pageWrap.dataset.width);
-        const h = parseFloat(pageWrap.dataset.height);
-        const signer = doc.signers.find(s => s.id === f.signer_id);
-        const box = document.createElement('div');
-        box.className = 'field-box';
-        box.style.left = (f.x * w) + 'px';
-        box.style.top = (f.y * h) + 'px';
-        box.style.width = (f.width * w) + 'px';
-        box.style.height = (f.height * h) + 'px';
-        box.textContent = `${f.type} — ${signer ? signer.name : ''}`;
-        if (doc.status === 'draft') {
-          const del = document.createElement('div');
-          del.className = 'del';
-          del.textContent = '✕';
-          del.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            await fetch('/api/fields/' + f.id, { method: 'DELETE' });
-            await loadDoc();
-          });
-          box.appendChild(del);
-        }
-        pageWrap.appendChild(box);
-      });
-    }
-
-    const DEFAULT_SIZES = {
-      signature: { width: 0.22, height: 0.05 },
-      initials: { width: 0.09, height: 0.05 },
-      text: { width: 0.22, height: 0.04 },
-      date: { width: 0.14, height: 0.04 }
-    };
-
-    async function onPageClick(e) {
-      if (!placing) return;
-      const pageWrap = e.currentTarget;
-      const rect = pageWrap.getBoundingClientRect();
-      const w = parseFloat(pageWrap.dataset.width);
-      const h = parseFloat(pageWrap.dataset.height);
-      const size = DEFAULT_SIZES[placeType];
-      const clickX = (e.clientX - rect.left) / w;
-      const clickY = (e.clientY - rect.top) / h;
-      const x = Math.max(0, Math.min(1 - size.width, clickX - size.width / 2));
-      const y = Math.max(0, Math.min(1 - size.height, clickY - size.height / 2));
-
-      await fetch(`/api/documents/${docId}/fields`, {
-        method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({
-          signer_id: activeSignerId,
-          type: placeType,
-          page: parseInt(pageWrap.dataset.page, 10),
-          x, y, width: size.width, height: size.height,
-          label: placeType
-        })
-      });
-      placing = false;
-      document.getElementById('placeModeBtn').textContent = 'Click to place field';
-      document.getElementById('placeHint').textContent = '';
-      await loadDoc();
-    }
-
-    document.getElementById('sendBtn').addEventListener('click', async () => {
-      const note = document.getElementById('sendNote').value.trim();
-      const res = await fetch(`/api/documents/${docId}/send`, {
-        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ note })
-      });
-      const data = await res.json();
-      if (!res.ok) { alert(data.error || 'Could not send'); return; }
-      const box = document.getElementById('linksBox');
-      box.innerHTML = '<p class="hint">' + (data.smtpConfigured ? 'Emails were sent automatically. Links below as backup:' : 'SMTP is not configured — copy and send these links yourself:') + '</p>'
-        + data.links.map(l => `
-        <div class="copy-link-row">
-          <input readonly value="${l.url}" />
-          <button class="btn secondary small-btn" onclick="navigator.clipboard.writeText('${l.url}')">Copy</button>
-        </div>
-        <div class="hint" style="margin-top:-6px; margin-bottom:8px;">
-          ${l.email ? (l.emailed ? `✅ Emailed to ${l.email}` : (data.smtpConfigured ? `⚠️ Email to ${l.email} failed: ${l.emailError || 'unknown error'}` : `No email sent (SMTP not configured)`)) : 'No email address on file for this signer'}
-        </div>`).join('');
-      await loadDoc();
-    });
-
-    async function checkMailerStatus() {
-      try {
-        const res = await fetch('/api/mailer/status');
-        const data = await res.json();
-        const el = document.getElementById('smtpNotice');
-        el.textContent = data.configured
-          ? '✅ SMTP is configured — signers with an email address will be emailed automatically.'
-          : '⚠️ SMTP is not configured on the server — you\'ll get links to copy and send manually.';
-      } catch (e) { /* ignore */ }
-    }
-
-    document.getElementById('logoutBtn').addEventListener('click', async () => {
-      await fetch('/api/logout', { method: 'POST' });
-      window.location.href = '/login.html';
-    });
-
-    checkAuth().then(() => { loadDoc(); checkMailerStatus(); });
-  </script>
+  </main>
 </body>
 </html>

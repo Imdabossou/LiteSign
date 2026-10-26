@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const config = require('./config');
 
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587', 10);
@@ -6,7 +7,7 @@ const SMTP_SECURE = process.env.SMTP_SECURE === 'true' || SMTP_PORT === 465;
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
-const APP_NAME = process.env.APP_NAME || 'LiteSign';
+const APP_NAME = config.APP_NAME;
 
 let transporter = null;
 let configured = false;
@@ -46,11 +47,11 @@ async function sendSigningRequest({ to, signerName, documentTitle, signUrl, send
       <p>You've been asked to sign <strong>${escapeHtml(documentTitle)}</strong>.</p>
       ${senderNote ? `<p style="color:#555;">${escapeHtml(senderNote)}</p>` : ''}
       <p style="margin:24px 0;">
-        <a href="${signUrl}" style="background:#2563eb;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;display:inline-block;">
+        <a href="${escapeHtml(signUrl)}" style="background:#2563eb;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;display:inline-block;">
           Review &amp; sign document
         </a>
       </p>
-      <p style="color:#888; font-size:12px;">If the button doesn't work, copy this link into your browser:<br>${signUrl}</p>
+      <p style="color:#888; font-size:12px;">If the button doesn't work, copy this link into your browser:<br>${escapeHtml(signUrl)}</p>
       <p style="color:#888; font-size:12px;">Sent via ${escapeHtml(APP_NAME)}</p>
     </div>`;
   return transporter.sendMail({ from: SMTP_FROM, to, subject, text, html });

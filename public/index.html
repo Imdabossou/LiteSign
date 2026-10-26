@@ -2,100 +2,45 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Lite Sign — Documents</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
 <link rel="stylesheet" href="/style.css" />
+<title>Documents — LiteSign</title>
+<script type="module" src="/js/dashboard.js"></script>
 </head>
 <body>
-  <div class="topbar">
-    <div class="brand">Lite<span>Sign</span></div>
+  <header class="topbar">
+    <a class="brand" href="/">Lite<span>Sign</span></a>
     <button class="btn secondary" id="logoutBtn">Log out</button>
-  </div>
-  <div class="container">
-    <div class="card">
-      <h3 style="margin-top:0">Upload a document</h3>
+  </header>
+  <main class="container">
+    <form class="card" id="uploadForm">
+      <h2>Upload a document</h2>
+      <label class="dropzone" id="dropzone" for="file">
+        <input type="file" id="file" accept="application/pdf,.pdf" />
+        <span id="dropText"><strong>Choose a PDF</strong> or drag it here</span>
+      </label>
       <div class="field-row">
-        <label>Title</label>
-        <input type="text" id="title" placeholder="e.g. NDA — Acme Corp" />
+        <label for="title">Title</label>
+        <input type="text" id="title" maxlength="200" placeholder="Defaults to the file name" />
       </div>
-      <div class="field-row">
-        <label>PDF file</label>
-        <input type="file" id="file" accept="application/pdf" />
-      </div>
-      <button class="btn" id="uploadBtn">Upload &amp; set up signing</button>
-      <div class="error-msg" id="uploadErr"></div>
-    </div>
+      <button class="btn" type="submit" id="uploadBtn">Upload &amp; set up signing</button>
+      <div class="error-msg" id="uploadErr" role="alert"></div>
+    </form>
 
-    <div class="card">
-      <h3 style="margin-top:0">Documents</h3>
+    <section class="card">
+      <div class="card-head">
+        <h2>Documents</h2>
+        <div class="filters" id="filters" role="tablist">
+          <button class="chip active" data-filter="all">All</button>
+          <button class="chip" data-filter="draft">Drafts</button>
+          <button class="chip" data-filter="pending">Out for signing</button>
+          <button class="chip" data-filter="completed">Completed</button>
+        </div>
+      </div>
       <div id="docList"><div class="empty">Loading…</div></div>
-    </div>
-  </div>
-  <footer class="appfoot">LiteSign — self-hosted, single container, no paywalls.</footer>
-
-  <script>
-    async function checkAuth() {
-      const r = await fetch('/api/session');
-      const d = await r.json();
-      if (!d.authed) window.location.href = '/login.html';
-    }
-
-    function badge(status) {
-      return `<span class="badge ${status}">${status}</span>`;
-    }
-
-    async function loadDocs() {
-      const res = await fetch('/api/documents');
-      const docs = await res.json();
-      const el = document.getElementById('docList');
-      if (docs.length === 0) { el.innerHTML = '<div class="empty">No documents yet — upload one above.</div>'; return; }
-      el.innerHTML = docs.map(d => {
-        const signedCount = d.signers.filter(s => s.status === 'signed').length;
-        return `
-        <div class="doc-row">
-          <div>
-            <div class="doc-title">${escapeHtml(d.title)}</div>
-            <div class="doc-meta">${badge(d.status)} &nbsp; ${d.signers.length} signer(s), ${signedCount} signed &nbsp;•&nbsp; ${new Date(d.created_at).toLocaleString()}</div>
-          </div>
-          <div style="display:flex; gap:8px;">
-            ${d.status === 'draft' ? `<a class="btn small-btn" href="/editor.html?doc=${d.id}">Set up</a>` : `<a class="btn secondary small-btn" href="/editor.html?doc=${d.id}">View</a>`}
-            ${d.status === 'completed' ? `<a class="btn secondary small-btn" href="/api/documents/${d.id}/download">Download</a>` : ''}
-            <button class="btn danger small-btn" onclick="deleteDoc('${d.id}')">Delete</button>
-          </div>
-        </div>`;
-      }).join('');
-    }
-
-    function escapeHtml(s) {
-      return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-    }
-
-    async function deleteDoc(id) {
-      if (!confirm('Delete this document permanently?')) return;
-      await fetch('/api/documents/' + id, { method: 'DELETE' });
-      loadDocs();
-    }
-
-    document.getElementById('uploadBtn').addEventListener('click', async () => {
-      const title = document.getElementById('title').value.trim();
-      const fileInput = document.getElementById('file');
-      const errEl = document.getElementById('uploadErr');
-      errEl.textContent = '';
-      if (!fileInput.files[0]) { errEl.textContent = 'Please choose a PDF file.'; return; }
-      const fd = new FormData();
-      fd.append('title', title || fileInput.files[0].name);
-      fd.append('file', fileInput.files[0]);
-      const res = await fetch('/api/documents', { method: 'POST', body: fd });
-      const data = await res.json();
-      if (!res.ok) { errEl.textContent = data.error || 'Upload failed'; return; }
-      window.location.href = '/editor.html?doc=' + data.id;
-    });
-
-    document.getElementById('logoutBtn').addEventListener('click', async () => {
-      await fetch('/api/logout', { method: 'POST' });
-      window.location.href = '/login.html';
-    });
-
-    checkAuth().then(loadDocs);
-  </script>
+    </section>
+  </main>
+  <footer class="appfoot">LiteSign: self-hosted document signing</footer>
 </body>
 </html>

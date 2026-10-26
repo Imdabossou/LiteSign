@@ -1,20 +1,24 @@
 {
-  "name": "lite-sign",
+  "name": "litesign",
   "version": "1.0.0",
   "description": "Lightweight self-hosted document signing",
   "main": "server/server.js",
   "scripts": {
-    "start": "node server/server.js"
+    "start": "node server/server.js",
+    "test": "node --test"
   },
   "dependencies": {
-    "better-sqlite3": "^11.3.0",
-    "express": "^4.19.2",
-    "express-rate-limit": "^7.5.1",
-    "express-session": "^1.18.0",
-    "helmet": "^7.2.0",
-    "multer": "^2.2.0",
-    "nanoid": "^3.3.7",
-    "nodemailer": "^9.0.4",
-    "pdf-lib": "^1.17.1"
+    "better-sqlite3": "^13.0.3",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
+    "express-session": "^1.19.0",
+    "helmet": "^8.3.0",
+    "multer": "^2.5.0",
+    "nodemailer": "^10.2.1",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.4.299"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

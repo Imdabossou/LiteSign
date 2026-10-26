@@ -1,63 +1,79 @@
 const express = require('express');
-const session = require('express-session');
 const multer = require('multer');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { nanoid } = require('nanoid');
-const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
+const { PDFDocument } = require('pdf-lib');
+const config = require('./config');
 const db = require('./db');
-const { requireAuth } = require('./auth');
+const { checkAdminPassword, passwordMatches, sessionMiddleware, requireAuth } = require('./auth');
 const mailer = require('./mailer');
+const { buildSignedPdf } = require('./stamp');
+
+checkAdminPassword();
+
+const { FILES_DIR, BASE_URL } = config;
+const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+const PDFJS_DIR = path.dirname(require.resolve('pdfjs-dist/package.json'));
+
+const FIELD_TYPES = ['signature', 'initials', 'text', 'date'];
+const MAX_SIGNATURE_BYTES = 512 * 1024;
 
 const app = express();
-const PORT = process.env.PORT || 8080;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'changeme';
-const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
-const FILES_DIR = path.join(DATA_DIR, 'files');
-const BASE_URL = process.env.BASE_URL || '';
-// Number of reverse-proxy hops in front of this app (nginx/Caddy/Cloudflare = 1).
-// Needed so req.ip / X-Forwarded-For and secure cookies work when internet-facing.
-const TRUST_PROXY = process.env.TRUST_PROXY !== undefined ? process.env.TRUST_PROXY : '1';
-app.set('trust proxy', isNaN(Number(TRUST_PROXY)) ? TRUST_PROXY : Number(TRUST_PROXY));
+app.set('trust proxy', config.TRUST_PROXY);
+app.disable('x-powered-by');
 
-// Security headers. CSP is left off because the frontend uses plain inline
-// <script> tags (no build step) and loads PDF.js from a CDN — enabling a
-// strict default CSP would break the signing/editor pages. Everything else
-// helmet sets (X-Content-Type-Options, X-Frame-Options, HSTS, etc.) stays on.
-app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
-
-app.use(express.json({ limit: '25mb' }));
-app.use(session({
-  secret: SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    maxAge: 1000 * 60 * 60 * 12,
-    secure: BASE_URL.startsWith('https://'),
-    sameSite: 'lax'
-  }
+// Security headers. All scripts are served from this app (no inline script,
+// no CDN), so the CSP can lock scripts down to 'self'. PDF.js needs a worker,
+// WebAssembly for some image formats, and data:/blob: images.
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      'script-src': ["'self'", "'wasm-unsafe-eval'"],
+      'worker-src': ["'self'"],
+      'img-src': ["'self'", 'data:', 'blob:'],
+      'upgrade-insecure-requests': config.SECURE_COOKIES ? [] : null
+    }
+  },
+  crossOriginEmbedderPolicy: false
 }));
+
+app.use(express.json({ limit: '5mb' }));
+app.use(sessionMiddleware());
+
+// Defence in depth against cross-site requests: a browser always sends Origin
+// on cross-site POST/DELETE, so reject any state-changing API call from a
+// different origin. (The SameSite=Lax cookie already blocks most of these.)
+app.use('/api', (req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  const origin = req.get('origin');
+  if (!origin) return next();
+  let host;
+  try { host = new URL(origin).host; } catch { host = null; }
+  const allowed = [req.get('host'), config.BASE_HOST].filter(Boolean);
+  if (host && allowed.includes(host)) return next();
+  res.status(403).json({ error: 'Cross-origin request blocked' });
+});
 
 // Slow down credential-guessing against the single admin account.
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
-  standardHeaders: true,
+  standardHeaders: 'draft-8',
   legacyHeaders: false,
+  skipSuccessfulRequests: true,
   message: { error: 'Too many login attempts. Try again later.' }
 });
 
 // Public signer endpoints are internet-facing and unauthenticated by design
-// (the token *is* the credential) — rate-limit them against brute forcing
+// (the token *is* the credential), so rate-limit them against brute forcing
 // or scraping the token space.
 const publicSignLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 60,
-  standardHeaders: true,
+  limit: 120,
+  standardHeaders: 'draft-8',
   legacyHeaders: false,
   message: { error: 'Too many requests. Try again later.' }
 });
@@ -65,333 +81,422 @@ const publicSignLimiter = rateLimit({
 const upload = multer({
   storage: multer.diskStorage({
     destination: FILES_DIR,
-    filename: (req, file, cb) => cb(null, `${nanoid()}.pdf`)
+    filename: (req, file, cb) => cb(null, `${newId()}.pdf`)
   }),
-  limits: { fileSize: 25 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype !== 'application/pdf') return cb(new Error('Only PDF files are allowed'));
-    cb(null, true);
-  }
+  limits: { fileSize: config.MAX_UPLOAD_MB * 1024 * 1024, files: 1, fields: 5 }
 });
 
+function newId(bytes = 12) { return crypto.randomBytes(bytes).toString('base64url'); }
 function now() { return new Date().toISOString(); }
-function clientIp(req) { return (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString(); }
+// req.ip honours the "trust proxy" setting; reading X-Forwarded-For directly
+// would let anyone write whatever IP they like into the audit log.
+function clientIp(req) { return (req.ip || req.socket.remoteAddress || '').replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, ''); }
+function signUrl(token) { return `${BASE_URL}/sign.html?token=${token}`; }
+function safeFilename(title) { return (title || 'document').replace(/[^a-z0-9\- _]/gi, '_').slice(0, 100); }
+function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
+
+function httpError(status, message) {
+  return Object.assign(new Error(message), { status, expose: true });
+}
+
 function logAudit(documentId, event, detail, ip) {
   db.prepare('INSERT INTO audit_log (document_id, event, detail, ip, created_at) VALUES (?, ?, ?, ?, ?)')
     .run(documentId, event, detail || null, ip || null, now());
 }
 
+const getDoc = id => db.prepare('SELECT * FROM documents WHERE id = ?').get(id);
+const getSigners = docId => db.prepare('SELECT * FROM signers WHERE document_id = ? ORDER BY order_index').all(docId);
+const getFields = docId => db.prepare('SELECT * FROM fields WHERE document_id = ?').all(docId);
+
+function loadDoc(req) {
+  const doc = getDoc(req.params.id);
+  if (!doc) throw httpError(404, 'Not found');
+  return doc;
+}
+
+function requireDraft(doc) {
+  if (doc.status !== 'draft') throw httpError(409, 'This document has already been sent and can no longer be edited');
+}
+
+function str(value, max) {
+  return typeof value === 'string' ? value.trim().slice(0, max) : '';
+}
+
+const EMAIL_RE = /^[^\s@<>()",;]+@[^\s@<>()",;]+\.[^\s@<>()",;]+$/;
+
+// ---------- Health ----------
+app.get('/healthz', (req, res) => {
+  db.prepare('SELECT 1').get();
+  res.json({ ok: true });
+});
+
 // ---------- Auth ----------
-app.post('/api/login', loginLimiter, (req, res) => {
+app.post('/api/login', loginLimiter, (req, res, next) => {
   const { password } = req.body || {};
-  if (password && password === ADMIN_PASSWORD) {
+  if (!passwordMatches(password)) return res.status(401).json({ error: 'Incorrect password' });
+  // New session ID on login, so a session ID planted before login is useless.
+  req.session.regenerate(err => {
+    if (err) return next(err);
     req.session.authed = true;
-    return res.json({ ok: true });
-  }
-  res.status(401).json({ error: 'Incorrect password' });
+    req.session.save(err2 => err2 ? next(err2) : res.json({ ok: true }));
+  });
 });
 
 app.post('/api/logout', (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
+  req.session.destroy(() => {
+    res.clearCookie('litesign.sid');
+    res.json({ ok: true });
+  });
 });
 
 app.get('/api/session', (req, res) => {
   res.json({ authed: !!(req.session && req.session.authed) });
 });
 
-app.get('/api/mailer/status', requireAuth, async (req, res) => {
+app.get('/api/mailer/status', requireAuth, (req, res) => {
   res.json({ configured: mailer.isConfigured() });
 });
 
 // ---------- Documents (admin) ----------
-app.post('/api/documents', requireAuth, upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const id = nanoid();
-  const title = (req.body.title || req.file.originalname || 'Untitled').slice(0, 200);
-  db.prepare('INSERT INTO documents (id, title, original_filename, status, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(id, title, req.file.filename, 'draft', now());
-  logAudit(id, 'document_created', title, clientIp(req));
+app.post('/api/documents', requireAuth, upload.single('file'), async (req, res) => {
+  if (!req.file) throw httpError(400, 'No file uploaded');
+  const filePath = req.file.path;
+  let pageCount, hash;
+  try {
+    const bytes = fs.readFileSync(filePath);
+    if (bytes.subarray(0, 1024).indexOf('%PDF-') === -1) throw httpError(400, 'That file is not a PDF');
+    try {
+      pageCount = (await PDFDocument.load(bytes)).getPageCount();
+    } catch (e) {
+      throw httpError(400, /encrypt/i.test(e.message)
+        ? 'This PDF is password-protected or encrypted. Remove the protection and upload it again.'
+        : 'This PDF could not be read. Try re-saving or printing it to a new PDF.');
+    }
+    if (pageCount === 0) throw httpError(400, 'This PDF has no pages');
+    hash = sha256(bytes);
+  } catch (e) {
+    fs.rmSync(filePath, { force: true });
+    throw e;
+  }
+
+  const id = newId();
+  const title = str(req.body.title, 200) || str(req.file.originalname, 200).replace(/\.pdf$/i, '') || 'Untitled';
+  db.prepare(`INSERT INTO documents (id, title, original_filename, status, created_at, page_count, original_sha256)
+    VALUES (?, ?, ?, 'draft', ?, ?, ?)`)
+    .run(id, title, req.file.filename, now(), pageCount, hash);
+  logAudit(id, 'document_created', `${title} (${pageCount} page${pageCount === 1 ? '' : 's'}, sha256:${hash})`, clientIp(req));
   res.json({ id });
 });
 
 app.get('/api/documents', requireAuth, (req, res) => {
   const docs = db.prepare('SELECT * FROM documents ORDER BY created_at DESC').all();
-  const withSigners = docs.map(d => ({
-    ...d,
-    signers: db.prepare('SELECT id, name, email, status, signed_at FROM signers WHERE document_id = ? ORDER BY order_index').all(d.id)
-  }));
-  res.json(withSigners);
+  const signerStmt = db.prepare('SELECT id, name, email, status, signed_at, viewed_at FROM signers WHERE document_id = ? ORDER BY order_index');
+  res.json(docs.map(d => ({ ...d, signers: signerStmt.all(d.id) })));
 });
 
 app.get('/api/documents/:id', requireAuth, (req, res) => {
-  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
-  if (!doc) return res.status(404).json({ error: 'Not found' });
-  const signers = db.prepare('SELECT * FROM signers WHERE document_id = ? ORDER BY order_index').all(doc.id);
-  const fields = db.prepare('SELECT * FROM fields WHERE document_id = ?').all(doc.id);
-  res.json({ ...doc, signers, fields });
+  const doc = loadDoc(req);
+  const signers = getSigners(doc.id).map(s => ({ ...s, url: signUrl(s.token) }));
+  const fields = getFields(doc.id).map(({ value, ...f }) => ({ ...f, filled: value != null }));
+  res.json({ ...doc, signers, fields, smtpConfigured: mailer.isConfigured() });
 });
 
 app.delete('/api/documents/:id', requireAuth, (req, res) => {
-  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
-  if (!doc) return res.status(404).json({ error: 'Not found' });
-  db.prepare('DELETE FROM fields WHERE document_id = ?').run(doc.id);
-  db.prepare('DELETE FROM signers WHERE document_id = ?').run(doc.id);
-  db.prepare('DELETE FROM audit_log WHERE document_id = ?').run(doc.id);
-  db.prepare('DELETE FROM documents WHERE id = ?').run(doc.id);
-  [doc.original_filename, `completed_${doc.id}.pdf`].forEach(f => {
-    const p = path.join(FILES_DIR, f);
-    if (fs.existsSync(p)) fs.unlinkSync(p);
-  });
+  const doc = loadDoc(req);
+  db.transaction(() => {
+    db.prepare('DELETE FROM fields WHERE document_id = ?').run(doc.id);
+    db.prepare('DELETE FROM signers WHERE document_id = ?').run(doc.id);
+    db.prepare('DELETE FROM audit_log WHERE document_id = ?').run(doc.id);
+    db.prepare('DELETE FROM documents WHERE id = ?').run(doc.id);
+  })();
+  for (const f of [doc.original_filename, `completed_${doc.id}.pdf`]) {
+    fs.rmSync(path.join(FILES_DIR, path.basename(f)), { force: true });
+  }
   res.json({ ok: true });
 });
 
 app.get('/api/documents/:id/file', requireAuth, (req, res) => {
-  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
-  if (!doc) return res.status(404).end();
-  res.sendFile(path.join(FILES_DIR, doc.original_filename));
+  const doc = loadDoc(req);
+  res.sendFile(path.join(FILES_DIR, path.basename(doc.original_filename)));
 });
 
 app.get('/api/documents/:id/download', requireAuth, (req, res) => {
-  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
-  if (!doc || doc.status !== 'completed') return res.status(404).json({ error: 'Not completed yet' });
+  const doc = loadDoc(req);
+  if (doc.status !== 'completed') throw httpError(404, 'Not completed yet');
   const p = path.join(FILES_DIR, `completed_${doc.id}.pdf`);
-  if (!fs.existsSync(p)) return res.status(404).json({ error: 'File missing' });
-  res.download(p, `${doc.title.replace(/[^a-z0-9\- _]/gi, '_')}_signed.pdf`);
+  if (!fs.existsSync(p)) throw httpError(404, 'File missing');
+  res.download(p, `${safeFilename(doc.title)}_signed.pdf`);
 });
 
 app.get('/api/documents/:id/audit', requireAuth, (req, res) => {
-  const logs = db.prepare('SELECT * FROM audit_log WHERE document_id = ? ORDER BY created_at').all(req.params.id);
-  res.json(logs);
+  const doc = loadDoc(req);
+  res.json(db.prepare('SELECT * FROM audit_log WHERE document_id = ? ORDER BY id').all(doc.id));
+});
+
+app.post('/api/documents/:id/void', requireAuth, (req, res) => {
+  const doc = loadDoc(req);
+  if (doc.status !== 'pending') throw httpError(409, 'Only documents that are out for signing can be cancelled');
+  db.prepare("UPDATE documents SET status = 'voided', voided_at = ? WHERE id = ?").run(now(), doc.id);
+  logAudit(doc.id, 'document_voided', str(req.body && req.body.reason, 500) || null, clientIp(req));
+  res.json({ ok: true });
+});
+
+// Re-run completion if it failed part way (e.g. disk full) after everyone signed.
+app.post('/api/documents/:id/finalize', requireAuth, async (req, res) => {
+  const doc = loadDoc(req);
+  if (doc.status !== 'pending') throw httpError(409, 'Document is not awaiting completion');
+  const remaining = db.prepare("SELECT COUNT(*) AS c FROM signers WHERE document_id = ? AND status != 'signed'").get(doc.id).c;
+  if (remaining > 0) throw httpError(409, 'Not everyone has signed yet');
+  await finalizeDocument(doc.id);
+  res.json({ ok: true });
 });
 
 // ---------- Signers (admin) ----------
 app.post('/api/documents/:id/signers', requireAuth, (req, res) => {
-  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
-  if (!doc) return res.status(404).json({ error: 'Not found' });
-  const { name, email } = req.body || {};
-  if (!name) return res.status(400).json({ error: 'Name is required' });
-  const id = nanoid();
-  const token = nanoid(24);
-  const countRow = db.prepare('SELECT COUNT(*) as c FROM signers WHERE document_id = ?').get(doc.id);
-  db.prepare('INSERT INTO signers (id, document_id, name, email, token, order_index, status) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(id, doc.id, name, email || null, token, countRow.c, 'pending');
-  res.json({ id, token });
+  const doc = loadDoc(req);
+  requireDraft(doc);
+  const name = str(req.body && req.body.name, 200);
+  const email = str(req.body && req.body.email, 254);
+  if (!name) throw httpError(400, 'Name is required');
+  if (email && !EMAIL_RE.test(email)) throw httpError(400, 'That email address doesn\'t look right');
+  const id = newId();
+  const next = db.prepare('SELECT COALESCE(MAX(order_index) + 1, 0) AS n FROM signers WHERE document_id = ?').get(doc.id).n;
+  db.prepare("INSERT INTO signers (id, document_id, name, email, token, order_index, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')")
+    .run(id, doc.id, name, email || null, newId(24), next);
+  res.json({ id });
 });
 
 app.delete('/api/signers/:id', requireAuth, (req, res) => {
   const signer = db.prepare('SELECT * FROM signers WHERE id = ?').get(req.params.id);
-  if (!signer) return res.status(404).json({ error: 'Not found' });
-  db.prepare('DELETE FROM fields WHERE signer_id = ?').run(signer.id);
-  db.prepare('DELETE FROM signers WHERE id = ?').run(signer.id);
+  if (!signer) throw httpError(404, 'Not found');
+  requireDraft(getDoc(signer.document_id));
+  db.transaction(() => {
+    db.prepare('DELETE FROM fields WHERE signer_id = ?').run(signer.id);
+    db.prepare('DELETE FROM signers WHERE id = ?').run(signer.id);
+  })();
   res.json({ ok: true });
 });
 
 // ---------- Fields (admin) ----------
-app.post('/api/documents/:id/fields', requireAuth, (req, res) => {
-  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
-  if (!doc) return res.status(404).json({ error: 'Not found' });
-  const { signer_id, type, page, x, y, width, height, label } = req.body || {};
-  if (!signer_id || !type || page == null || x == null || y == null) {
-    return res.status(400).json({ error: 'Missing field data' });
+function fieldGeometry(body, doc, current = {}) {
+  const pick = k => (body[k] !== undefined ? body[k] : current[k]);
+  const g = { page: pick('page'), x: pick('x'), y: pick('y'), width: pick('width'), height: pick('height') };
+  if (!Number.isInteger(g.page) || g.page < 0 || (doc.page_count != null && g.page >= doc.page_count)) {
+    throw httpError(400, 'Invalid page');
   }
-  const id = nanoid();
+  for (const k of ['x', 'y', 'width', 'height']) {
+    if (typeof g[k] !== 'number' || !Number.isFinite(g[k]) || g[k] < 0 || g[k] > 1) throw httpError(400, `Invalid ${k}`);
+  }
+  if (g.width < 0.01 || g.height < 0.005) throw httpError(400, 'Field is too small');
+  g.x = Math.min(g.x, 1 - g.width);
+  g.y = Math.min(g.y, 1 - g.height);
+  return g;
+}
+
+app.post('/api/documents/:id/fields', requireAuth, (req, res) => {
+  const doc = loadDoc(req);
+  requireDraft(doc);
+  const body = req.body || {};
+  if (!FIELD_TYPES.includes(body.type)) throw httpError(400, 'Invalid field type');
+  const signer = db.prepare('SELECT id FROM signers WHERE id = ? AND document_id = ?').get(body.signer_id, doc.id);
+  if (!signer) throw httpError(400, 'Unknown signer');
+  const g = fieldGeometry(body, doc);
+  const id = newId();
   db.prepare(`INSERT INTO fields (id, document_id, signer_id, type, page, x, y, width, height, label)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(id, doc.id, signer_id, type, page, x, y, width || 0.18, height || 0.045, label || null);
+    .run(id, doc.id, signer.id, body.type, g.page, g.x, g.y, g.width, g.height, str(body.label, 100) || null);
   res.json({ id });
 });
 
-app.delete('/api/fields/:id', requireAuth, (req, res) => {
-  db.prepare('DELETE FROM fields WHERE id = ?').run(req.params.id);
+app.patch('/api/fields/:id', requireAuth, (req, res) => {
+  const field = db.prepare('SELECT * FROM fields WHERE id = ?').get(req.params.id);
+  if (!field) throw httpError(404, 'Not found');
+  const doc = getDoc(field.document_id);
+  requireDraft(doc);
+  const body = req.body || {};
+  const g = fieldGeometry(body, doc, field);
+  const label = body.label !== undefined ? (str(body.label, 100) || null) : field.label;
+  db.prepare('UPDATE fields SET page = ?, x = ?, y = ?, width = ?, height = ?, label = ? WHERE id = ?')
+    .run(g.page, g.x, g.y, g.width, g.height, label, field.id);
   res.json({ ok: true });
 });
 
-app.post('/api/documents/:id/send', requireAuth, async (req, res) => {
-  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
-  if (!doc) return res.status(404).json({ error: 'Not found' });
-  const signers = db.prepare('SELECT * FROM signers WHERE document_id = ?').all(doc.id);
-  if (signers.length === 0) return res.status(400).json({ error: 'Add at least one signer first' });
-  const fieldCount = db.prepare('SELECT COUNT(*) as c FROM fields WHERE document_id = ?').get(doc.id);
-  if (fieldCount.c === 0) return res.status(400).json({ error: 'Add at least one field first' });
-  db.prepare('UPDATE documents SET status = ? WHERE id = ?').run('pending', doc.id);
-  logAudit(doc.id, 'document_sent', `${signers.length} signer(s)`, clientIp(req));
+app.delete('/api/fields/:id', requireAuth, (req, res) => {
+  const field = db.prepare('SELECT * FROM fields WHERE id = ?').get(req.params.id);
+  if (!field) throw httpError(404, 'Not found');
+  requireDraft(getDoc(field.document_id));
+  db.prepare('DELETE FROM fields WHERE id = ?').run(field.id);
+  res.json({ ok: true });
+});
 
-  const note = (req.body && req.body.note) || null;
-  const results = [];
-  for (const s of signers) {
-    const url = `${BASE_URL}/sign.html?token=${s.token}`;
-    let emailed = false, emailError = null;
-    if (s.email && mailer.isConfigured()) {
-      try {
-        await mailer.sendSigningRequest({ to: s.email, signerName: s.name, documentTitle: doc.title, signUrl: url, senderNote: note });
-        emailed = true;
-        logAudit(doc.id, 'email_sent', `signing request to ${s.email}`, clientIp(req));
-      } catch (e) {
-        emailError = e.message;
-        logAudit(doc.id, 'email_failed', `${s.email}: ${e.message}`, clientIp(req));
-      }
-    }
-    results.push({ signer: s.name, email: s.email, url, emailed, emailError });
+// ---------- Sending ----------
+async function emailSigner(doc, signer, note, ip, event) {
+  const url = signUrl(signer.token);
+  if (!signer.email || !mailer.isConfigured()) return { emailed: false, emailError: null };
+  try {
+    await mailer.sendSigningRequest({ to: signer.email, signerName: signer.name, documentTitle: doc.title, signUrl: url, senderNote: note });
+    logAudit(doc.id, event, `signing request to ${signer.email}`, ip);
+    return { emailed: true, emailError: null };
+  } catch (e) {
+    logAudit(doc.id, 'email_failed', `${signer.email}: ${e.message}`, ip);
+    return { emailed: false, emailError: e.message };
   }
-  res.json({ ok: true, smtpConfigured: mailer.isConfigured(), links: results });
+}
+
+app.post('/api/documents/:id/send', requireAuth, async (req, res) => {
+  const doc = loadDoc(req);
+  requireDraft(doc);
+  const signers = getSigners(doc.id);
+  if (signers.length === 0) throw httpError(400, 'Add at least one signer first');
+  const counts = db.prepare('SELECT signer_id, COUNT(*) AS c FROM fields WHERE document_id = ? GROUP BY signer_id').all(doc.id);
+  const withFields = new Set(counts.map(r => r.signer_id));
+  const missing = signers.filter(s => !withFields.has(s.id));
+  if (missing.length) {
+    throw httpError(400, `Place at least one field for ${missing.map(s => s.name).join(', ')}`);
+  }
+
+  // Flip to pending before the (slow) emails go out, so a double-click can't send twice.
+  const changed = db.prepare("UPDATE documents SET status = 'pending', sent_at = ? WHERE id = ? AND status = 'draft'").run(now(), doc.id);
+  if (changed.changes === 0) throw httpError(409, 'This document has already been sent');
+  const ip = clientIp(req);
+  logAudit(doc.id, 'document_sent', `${signers.length} signer(s)`, ip);
+
+  const note = str(req.body && req.body.note, 1000) || null;
+  const links = [];
+  for (const s of signers) {
+    const result = await emailSigner(doc, s, note, ip, 'email_sent');
+    links.push({ signer: s.name, email: s.email, url: signUrl(s.token), ...result });
+  }
+  res.json({ ok: true, smtpConfigured: mailer.isConfigured(), links });
 });
 
 app.post('/api/signers/:id/resend', requireAuth, async (req, res) => {
   const signer = db.prepare('SELECT * FROM signers WHERE id = ?').get(req.params.id);
-  if (!signer) return res.status(404).json({ error: 'Not found' });
-  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(signer.document_id);
-  if (signer.status === 'signed') return res.status(400).json({ error: 'This signer has already signed' });
-  const url = `${BASE_URL}/sign.html?token=${signer.token}`;
+  if (!signer) throw httpError(404, 'Not found');
+  const doc = getDoc(signer.document_id);
+  const url = signUrl(signer.token);
+  if (doc.status !== 'pending') return res.status(409).json({ error: 'This document is not out for signing', url });
+  if (signer.status === 'signed') return res.status(400).json({ error: 'This signer has already signed', url });
   if (!signer.email) return res.status(400).json({ error: 'This signer has no email on file', url });
   if (!mailer.isConfigured()) return res.status(400).json({ error: 'SMTP is not configured on the server', url });
-  try {
-    await mailer.sendSigningRequest({ to: signer.email, signerName: signer.name, documentTitle: doc.title, signUrl: url, senderNote: (req.body && req.body.note) || null });
-    logAudit(doc.id, 'email_resent', `signing request to ${signer.email}`, clientIp(req));
-    res.json({ ok: true, url });
-  } catch (e) {
-    logAudit(doc.id, 'email_failed', `${signer.email}: ${e.message}`, clientIp(req));
-    res.status(500).json({ error: e.message, url });
-  }
+  const result = await emailSigner(doc, signer, str(req.body && req.body.note, 1000) || null, clientIp(req), 'email_resent');
+  if (!result.emailed) return res.status(502).json({ error: result.emailError, url });
+  res.json({ ok: true, url });
 });
 
 // ---------- Public signer routes (token-based) ----------
-function getSignerByToken(token) {
-  return db.prepare('SELECT * FROM signers WHERE token = ?').get(token);
-}
+const signRouter = express.Router({ mergeParams: true });
+app.use('/api/sign/:token', publicSignLimiter, signRouter);
 
-app.get('/api/sign/:token', publicSignLimiter, (req, res) => {
-  const signer = getSignerByToken(req.params.token);
-  if (!signer) return res.status(404).json({ error: 'Invalid link' });
-  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(signer.document_id);
-  const fields = db.prepare('SELECT * FROM fields WHERE signer_id = ? ORDER BY page').all(signer.id);
+signRouter.use((req, res, next) => {
+  const signer = db.prepare('SELECT * FROM signers WHERE token = ?').get(req.params.token);
+  const doc = signer && getDoc(signer.document_id);
+  // Links aren't live until the document is sent.
+  if (!signer || !doc || doc.status === 'draft') return res.status(404).json({ error: 'Invalid link' });
+  req.signer = signer;
+  req.doc = doc;
+  next();
+});
+
+signRouter.get('/', (req, res) => {
+  const { signer, doc } = req;
+  if (!signer.viewed_at && doc.status === 'pending') {
+    const t = now();
+    db.prepare('UPDATE signers SET viewed_at = ? WHERE id = ?').run(t, signer.id);
+    signer.viewed_at = t;
+    logAudit(doc.id, 'signer_viewed', signer.name, clientIp(req));
+  }
+  const fields = db.prepare('SELECT id, type, page, x, y, width, height, label FROM fields WHERE signer_id = ? ORDER BY page, y, x').all(signer.id);
   res.json({
-    document: { id: doc.id, title: doc.title, status: doc.status },
-    signer: { id: signer.id, name: signer.name, status: signer.status, signed_at: signer.signed_at },
+    document: { title: doc.title, status: doc.status },
+    signer: { name: signer.name, status: signer.status, signed_at: signer.signed_at },
     fields
   });
 });
 
-app.get('/api/sign/:token/file', publicSignLimiter, (req, res) => {
-  const signer = getSignerByToken(req.params.token);
-  if (!signer) return res.status(404).end();
-  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(signer.document_id);
-  res.sendFile(path.join(FILES_DIR, doc.original_filename));
+signRouter.get('/file', (req, res) => {
+  if (req.doc.status === 'voided') return res.status(410).json({ error: 'This document has been cancelled' });
+  res.sendFile(path.join(FILES_DIR, path.basename(req.doc.original_filename)));
 });
 
-app.post('/api/sign/:token/submit', publicSignLimiter, async (req, res) => {
-  const signer = getSignerByToken(req.params.token);
-  if (!signer) return res.status(404).json({ error: 'Invalid link' });
-  if (signer.status === 'signed') return res.status(400).json({ error: 'Already signed' });
-  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(signer.document_id);
-  const fields = db.prepare('SELECT * FROM fields WHERE signer_id = ?').all(signer.id);
-  const { values } = req.body || {};
-  if (!Array.isArray(values)) return res.status(400).json({ error: 'Missing values' });
+// Signers can download the finished copy too, e.g. if they gave no email address.
+signRouter.get('/download', (req, res) => {
+  const { doc } = req;
+  const p = path.join(FILES_DIR, `completed_${doc.id}.pdf`);
+  if (doc.status !== 'completed' || !fs.existsSync(p)) return res.status(404).json({ error: 'Not completed yet' });
+  res.download(p, `${safeFilename(doc.title)}_signed.pdf`);
+});
 
-  const valueMap = new Map(values.map(v => [v.field_id, v.value]));
+function validValue(field, value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  if (field.type === 'signature' || field.type === 'initials') {
+    const m = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+    if (!m) return false;
+    const bytes = Buffer.from(m[1], 'base64');
+    return bytes.length <= MAX_SIGNATURE_BYTES && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+  return value.length <= (field.type === 'date' ? 50 : 500);
+}
+
+signRouter.post('/submit', async (req, res) => {
+  const { signer, doc } = req;
+  if (signer.status === 'signed') throw httpError(400, 'You have already signed this document');
+  if (doc.status !== 'pending') throw httpError(409, doc.status === 'voided' ? 'This document has been cancelled' : 'This document is no longer accepting signatures');
+  const { values, consent } = req.body || {};
+  if (consent !== true) throw httpError(400, 'Please agree to sign electronically');
+  if (!Array.isArray(values)) throw httpError(400, 'Missing values');
+
+  const fields = db.prepare('SELECT * FROM fields WHERE signer_id = ?').all(signer.id);
+  const valueMap = new Map(values.filter(v => v && typeof v === 'object').map(v => [v.field_id, v.value]));
   for (const f of fields) {
-    const v = valueMap.get(f.id);
-    if (!v || !v.toString().trim()) {
-      return res.status(400).json({ error: `Field "${f.label || f.type}" is required` });
-    }
+    if (!validValue(f, valueMap.get(f.id))) throw httpError(400, `Field "${f.label || f.type}" is missing or invalid`);
   }
 
   const ip = clientIp(req);
-  const tx = db.transaction(() => {
-    for (const f of fields) {
-      db.prepare('UPDATE fields SET value = ? WHERE id = ?').run(valueMap.get(f.id), f.id);
-    }
-    db.prepare('UPDATE signers SET status = ?, signed_at = ?, signed_ip = ? WHERE id = ?')
-      .run('signed', now(), ip, signer.id);
+  const signed = db.transaction(() => {
+    // Re-check inside the transaction so a double submit can't sign twice.
+    const r = db.prepare("UPDATE signers SET status = 'signed', signed_at = ?, signed_ip = ? WHERE id = ? AND status != 'signed'")
+      .run(now(), ip, signer.id);
+    if (r.changes === 0) return false;
+    const setValue = db.prepare('UPDATE fields SET value = ? WHERE id = ?');
+    for (const f of fields) setValue.run(String(valueMap.get(f.id)).trim(), f.id);
+    logAudit(doc.id, 'signer_consented', `${signer.name} agreed to sign electronically`, ip);
     logAudit(doc.id, 'signer_signed', signer.name, ip);
-  });
-  tx();
+    return true;
+  })();
+  if (!signed) throw httpError(400, 'You have already signed this document');
 
-  const remaining = db.prepare('SELECT COUNT(*) as c FROM signers WHERE document_id = ? AND status != ?').get(doc.id, 'signed');
-  if (remaining.c === 0) {
-    await finalizeDocument(doc.id);
+  const remaining = db.prepare("SELECT COUNT(*) AS c FROM signers WHERE document_id = ? AND status != 'signed'").get(doc.id).c;
+  let completed = false;
+  if (remaining === 0) {
+    try {
+      await finalizeDocument(doc.id);
+      completed = true;
+    } catch (e) {
+      // The signature itself is saved; the sender can retry completion from the dashboard.
+      console.error(`[finalize] ${doc.id}:`, e);
+      logAudit(doc.id, 'completion_failed', e.message, null);
+    }
   }
-
-  res.json({ ok: true, completed: remaining.c === 0 });
+  res.json({ ok: true, completed });
 });
 
 async function finalizeDocument(documentId) {
-  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(documentId);
-  const signers = db.prepare('SELECT * FROM signers WHERE document_id = ? ORDER BY order_index').all(documentId);
-  const fields = db.prepare('SELECT * FROM fields WHERE document_id = ?').all(documentId);
+  const doc = getDoc(documentId);
+  const signers = getSigners(documentId);
+  const fields = getFields(documentId);
+  const completedAt = now();
 
-  const srcBytes = fs.readFileSync(path.join(FILES_DIR, doc.original_filename));
-  const pdfDoc = await PDFDocument.load(srcBytes);
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const pages = pdfDoc.getPages();
+  const srcBytes = fs.readFileSync(path.join(FILES_DIR, path.basename(doc.original_filename)));
+  const finalBytes = await buildSignedPdf({ srcBytes, doc, signers, fields, completedAt });
+  const hash = sha256(finalBytes);
 
-  for (const f of fields) {
-    const page = pages[f.page];
-    if (!page) continue;
-    const { width: pw, height: ph } = page.getSize();
-    const boxX = f.x * pw;
-    const boxWidth = f.width * pw;
-    const boxHeight = f.height * ph;
-    const boxYTop = f.y * ph; // stored top-down
-    const boxY = ph - boxYTop - boxHeight; // pdf-lib origin is bottom-left
-
-    if (f.type === 'signature' || f.type === 'initials') {
-      try {
-        const dataUrl = f.value;
-        const base64 = dataUrl.split(',')[1];
-        const imgBytes = Buffer.from(base64, 'base64');
-        const png = await pdfDoc.embedPng(imgBytes);
-        const scale = Math.min(boxWidth / png.width, boxHeight / png.height);
-        const drawW = png.width * scale;
-        const drawH = png.height * scale;
-        page.drawImage(png, {
-          x: boxX + (boxWidth - drawW) / 2,
-          y: boxY + (boxHeight - drawH) / 2,
-          width: drawW,
-          height: drawH
-        });
-      } catch (e) {
-        page.drawText('[signature]', { x: boxX, y: boxY + 4, size: 10, font, color: rgb(0, 0, 0) });
-      }
-    } else {
-      const fontSize = Math.min(12, boxHeight * 0.7);
-      page.drawText(String(f.value).slice(0, 200), {
-        x: boxX + 2,
-        y: boxY + (boxHeight - fontSize) / 2,
-        size: fontSize,
-        font,
-        color: rgb(0.05, 0.05, 0.05)
-      });
-    }
-  }
-
-  // Append audit / certificate page
-  const certPage = pdfDoc.addPage();
-  const { width: cw } = certPage.getSize();
-  let cy = certPage.getHeight() - 60;
-  const title = 'Signature Certificate';
-  certPage.drawText(title, { x: 50, y: cy, size: 18, font, color: rgb(0, 0, 0) });
-  cy -= 30;
-  certPage.drawText(`Document: ${doc.title}`, { x: 50, y: cy, size: 11, font });
-  cy -= 18;
-  certPage.drawText(`Document ID: ${doc.id}`, { x: 50, y: cy, size: 9, font, color: rgb(0.4, 0.4, 0.4) });
-  cy -= 18;
-  certPage.drawText(`Completed: ${now()}`, { x: 50, y: cy, size: 11, font });
-  cy -= 30;
-
-  for (const s of signers) {
-    certPage.drawText(`Signer: ${s.name}${s.email ? ' (' + s.email + ')' : ''}`, { x: 50, y: cy, size: 11, font });
-    cy -= 16;
-    certPage.drawText(`Signed at: ${s.signed_at || '-'}   IP: ${s.signed_ip || '-'}`, { x: 60, y: cy, size: 9, font, color: rgb(0.35, 0.35, 0.35) });
-    cy -= 24;
-  }
-
-  const finalBytes = await pdfDoc.save();
-
-  const hash = crypto.createHash('sha256').update(finalBytes).digest('hex');
+  const outPath = path.join(FILES_DIR, `completed_${documentId}.pdf`);
+  fs.writeFileSync(`${outPath}.tmp`, finalBytes);
+  fs.renameSync(`${outPath}.tmp`, outPath);
+  db.prepare("UPDATE documents SET status = 'completed', completed_at = ?, completed_sha256 = ? WHERE id = ?")
+    .run(completedAt, hash, documentId);
   logAudit(documentId, 'document_completed', `sha256:${hash}`, null);
-
-  fs.writeFileSync(path.join(FILES_DIR, `completed_${documentId}.pdf`), finalBytes);
-  db.prepare('UPDATE documents SET status = ?, completed_at = ? WHERE id = ?').run('completed', now(), documentId);
 
   if (mailer.isConfigured()) {
     for (const s of signers) {
@@ -402,7 +507,7 @@ async function finalizeDocument(documentId) {
           signerName: s.name,
           documentTitle: doc.title,
           downloadNote: 'A copy of the fully signed document is attached.',
-          attachment: { filename: `${doc.title.replace(/[^a-z0-9\- _]/gi, '_')}_signed.pdf`, content: finalBytes }
+          attachment: { filename: `${safeFilename(doc.title)}_signed.pdf`, content: Buffer.from(finalBytes) }
         });
         logAudit(documentId, 'completion_email_sent', s.email, null);
       } catch (e) {
@@ -413,15 +518,47 @@ async function finalizeDocument(documentId) {
 }
 
 // ---------- Static frontend ----------
-app.use(express.static(path.join(__dirname, '..', 'public')));
+// PDF.js is served from the installed npm package, so signers' browsers never
+// touch a third-party CDN.
+for (const dir of ['build', 'cmaps', 'standard_fonts', 'wasm', 'iccs']) {
+  app.use(`/vendor/pdfjs/${dir}`, express.static(path.join(PDFJS_DIR, dir), { maxAge: '7d', immutable: true }));
+}
+app.use(express.static(PUBLIC_DIR, { extensions: ['html'] }));
 
 app.use((req, res) => {
   if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'Not found' });
-  res.sendFile(path.join(__dirname, '..', 'public', '404.html'), err => {
-    if (err) res.status(404).send('Not found');
+  res.status(404).sendFile(path.join(PUBLIC_DIR, '404.html'), err => {
+    if (err && !res.headersSent) res.send('Not found');
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`lite-sign listening on port ${PORT}`);
+// Every error becomes a JSON response the frontend can show, instead of an
+// HTML stack trace.
+app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+  let status = err.status || err.statusCode || 500;
+  let message = err.expose ? err.message : 'Something went wrong';
+  if (err instanceof multer.MulterError) {
+    status = 400;
+    message = err.code === 'LIMIT_FILE_SIZE' ? `File is too large (max ${config.MAX_UPLOAD_MB} MB)` : err.message;
+  } else if (err.type === 'entity.too.large') {
+    message = 'Request is too large';
+  }
+  if (status >= 500) console.error(err);
+  if (res.headersSent) return next(err);
+  res.status(status).json({ error: message });
 });
+
+const server = app.listen(config.PORT, () => {
+  console.log(`LiteSign listening on port ${config.PORT}`);
+  if (!BASE_URL) console.warn('[config] BASE_URL is not set; signing links will be relative and won\'t work in emails.');
+});
+
+function shutdown() {
+  server.close(() => {
+    db.close();
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

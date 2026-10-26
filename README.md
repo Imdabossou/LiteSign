@@ -24,6 +24,8 @@ provider. No paid tier holding features back — there is no paid tier.
   file), emails every signer a copy of the finished PDF, and makes it
   available for download from the admin dashboard and from each signer's
   own link.
+- Light and dark themes for you and your signers, following the device's
+  setting by default, with a System / Light / Dark toggle on every page.
 - Copy any signer's link or resend their email while you wait, follow
   every step in the per-document audit trail, or cancel a request (which
   kills its links) if you sent the wrong version.

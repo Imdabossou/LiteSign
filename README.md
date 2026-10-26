@@ -1,158 +1,201 @@
 # LiteSign
 
-A genuinely lightweight, self-hosted document signing tool, built for
-sending documents to people *outside* your organization to sign over the
-web. One container. SQLite on disk. Sends real email via your own SMTP
-provider. No paid tier holding features back — there is no paid tier.
+**Self-hosted document signing that actually stays lightweight.** Upload a
+PDF, drop signature fields on it, and send it to people outside your
+organisation to sign in their browser. One container, one SQLite file, your
+own SMTP. No accounts for signers, no per-envelope pricing, no paid tier.
 
-## What it does
+![Placing signature and date fields for two signers in the LiteSign editor](docs/screenshots/editor.png)
 
-- Upload a PDF, add one or more signers (name + email), click on the
-  document to place signature / initials / text / date fields for each.
-  Drag fields to move them, drag the corner to resize, and double-click a
-  text field to give it a label (e.g. "Company name"). Each signer gets
-  their own colour.
-- Click "Send for signing" — LiteSign emails each signer a unique signing
-  link via SMTP (or shows you the links to send yourself if you haven't
-  configured SMTP).
-- Signers open their link (no account needed, works on phones), are
-  walked through each field in turn, draw or type their signature, agree
-  to sign electronically, and submit.
-- Once every signer has signed, LiteSign stamps all the values into the
-  PDF, appends a signature certificate (who signed, when they first opened
-  it, when they signed, from what IP, and the SHA-256 of the original
-  file), emails every signer a copy of the finished PDF, and makes it
-  available for download from the admin dashboard and from each signer's
-  own link.
-- Light and dark themes for you and your signers, following the device's
-  setting by default, with a System / Light / Dark toggle on every page.
-- Copy any signer's link or resend their email while you wait, follow
-  every step in the per-document audit trail, or cancel a request (which
-  kills its links) if you sent the wrong version.
-- Everything — the dashboard, audit log, and completed PDFs — lives in one
-  SQLite file and a folder of PDFs under `/app/data`.
+## Features
 
-## This is meant to be internet-facing
+**For you, the sender**
+- Upload a PDF and add as many signers as you need, each with their own colour.
+- Click to place **signature**, **initials**, **text** and **date** fields; drag to
+  move, drag the corner to resize, double-click a text field to label it
+  ("Company name", "Job title"…).
+- Send with one click. LiteSign emails each signer a private link, or, if
+  you haven't set up SMTP, gives you the links to send yourself.
+- Track progress: who has opened their link, who has signed, and a full
+  audit trail with timestamps and IP addresses.
+- Copy a link or resend an email at any time, or cancel a request if you
+  sent the wrong version (its links stop working immediately).
 
-Because it's for sending documents to people outside your org, this app is
-built to sit on the open internet behind a reverse proxy, and includes:
+**For your signers**
+- No account, no app: the link opens straight to the document.
+- Works properly on phones: pages fit the screen and a "Next field" button
+  walks them through every field.
+- Draw a signature with a finger, mouse or trackpad, or type it.
+- They agree to sign electronically, submit, and can download the
+  finished copy from the same link.
 
-- Rate limiting on login and on the public signer endpoints.
-- Security headers via `helmet`, including a strict Content-Security-Policy
-  (all scripts are served by the app itself; no inline script, no CDN).
-- Cross-origin request blocking on the API, SameSite session cookies, and a
-  new session ID on every login.
-- `trust proxy` support so signer IP addresses in the audit log and secure
-  cookies work correctly behind nginx/Caddy/Cloudflare Tunnel.
-- Session cookies automatically marked HTTPS-only once `BASE_URL` starts
-  with `https://`.
+**For the record**
+- When everyone has signed, LiteSign stamps every value into the PDF and
+  appends a **signature certificate**: each signer's name, email, when they
+  first opened the document, when they signed, and from what IP, plus the
+  SHA-256 of the original file.
+- Every signer is emailed the completed PDF, and its SHA-256 is kept in the
+  audit trail so you can later prove the file hasn't changed.
 
-You still need to put a real reverse proxy with TLS in front of it — this
-app speaks plain HTTP itself (see "Putting it behind HTTPS" below).
+**Everywhere**
+- Light and dark themes that follow the device's setting, with a
+  System / Light / Dark toggle on every page.
+
+## Screenshots
+
+<table>
+<tr><td colspan="2">
+
+**Signing on a phone:** guided field-by-field, draw or type a signature, done.
+
+![The signing page on a phone: the document, the signature pad, and the confirmation](docs/screenshots/signing-phone.png)
+
+</td></tr>
+<tr><td width="50%">
+
+**Dashboard**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dashboard-dark.png">
+  <img alt="Dashboard listing documents that are drafts, out for signing and completed" src="docs/screenshots/dashboard.png">
+</picture>
+
+</td><td width="50%">
+
+**Completed document** (dark mode)
+
+![A completed document with both signatures stamped in, the download button and the audit trail](docs/screenshots/completed-dark.png)
+
+</td></tr>
+<tr><td colspan="2">
+
+**The finished PDF:** values stamped in place, with a signature certificate appended.
+
+![Signed signature page and the appended signature certificate](docs/screenshots/certificate.png)
+
+</td></tr>
+</table>
 
 ## Quick start
 
-```bash
-cp .env.example .env
-# edit .env: set ADMIN_PASSWORD (required), your public BASE_URL, and your SMTP
-# credentials (Gmail app password, SendGrid, Mailgun, SES, Postmark, or
-# your own mail server all work)
+You need Docker with Compose.
 
+```bash
+git clone https://github.com/Imdabossou/LiteSign.git
+cd LiteSign
+cp .env.example .env
+# Edit .env: set ADMIN_PASSWORD (required), BASE_URL, and your SMTP details
 docker compose up -d --build
 ```
 
-Open **http://localhost:8080** (or your real domain), log in, and upload a
-PDF. If SMTP isn't configured yet, the app still works — you just get
-links to copy and paste into an email yourself instead of automatic
-sending.
+Open <http://localhost:8080>, log in with your `ADMIN_PASSWORD`, and upload
+a PDF. SMTP is optional: without it everything works, and you send the
+signing links yourself.
 
-### Or plain `docker run`, no compose
+<details>
+<summary>Plain <code>docker run</code> instead of Compose</summary>
 
 ```bash
 docker build -t litesign .
 docker run -d \
   --name litesign \
   -p 8080:8080 \
-  -e ADMIN_PASSWORD=your-real-password \
-  -e BASE_URL=https://sign.yourdomain.com \
-  -e SMTP_HOST=smtp.yourprovider.com \
+  -e ADMIN_PASSWORD='a-long-random-password' \
+  -e BASE_URL=https://sign.example.com \
+  -e SMTP_HOST=smtp.example.com \
   -e SMTP_PORT=587 \
-  -e SMTP_USER=you@yourdomain.com \
-  -e SMTP_PASS=your-smtp-password \
-  -e SMTP_FROM=you@yourdomain.com \
+  -e SMTP_USER=you@example.com \
+  -e SMTP_PASS='your-smtp-password' \
+  -e SMTP_FROM=you@example.com \
   -v litesign_data:/app/data \
   litesign
 ```
 
-## Configuration (environment variables)
+</details>
 
-| Variable          | Default      | Purpose                                                                 |
-|--------------------|--------------|--------------------------------------------------------------------------|
-| `ADMIN_PASSWORD`   | *(required)* | Password for the single admin account. The app won't start without it (or with `changeme`). |
-| `BASE_URL`         | `""`         | Public URL used to build signing links and to enable secure cookies (e.g. `https://sign.yourdomain.com`). |
-| `SMTP_HOST`        | *(unset)*    | SMTP server hostname. Leave unset to disable automatic email — links are still shown in the dashboard. |
-| `SMTP_PORT`        | `587`        | SMTP port. 587/25 use STARTTLS automatically; 465 needs `SMTP_SECURE=true`. |
-| `SMTP_SECURE`      | `false`      | Set `true` only for port 465 (implicit TLS).                            |
-| `SMTP_USER`        | *(unset)*    | SMTP auth username, if your provider requires auth.                     |
-| `SMTP_PASS`        | *(unset)*    | SMTP auth password / app password / API key.                            |
-| `SMTP_FROM`        | `SMTP_USER`  | From address on outgoing emails.                                        |
-| `TRUST_PROXY`      | `1`          | Number of reverse-proxy hops in front of the app. Needed for correct signer IPs and secure cookies. |
-| `PORT`             | `8080`       | Port the app listens on inside the container.                          |
-| `SESSION_SECRET`   | generated    | Cookie signing secret. Generated once and stored in the database if unset. |
-| `DATA_DIR`         | `/app/data`  | Where the SQLite DB and uploaded/completed PDFs are stored.            |
-| `APP_NAME`         | `LiteSign`   | Name shown in emails ("Sent via …").                                   |
-| `MAX_UPLOAD_MB`    | `25`         | Largest PDF you can upload.                                            |
+## Configuration
 
-## Putting it behind HTTPS
+All configuration is through environment variables (or `.env` with Compose).
 
-LiteSign speaks plain HTTP — put a reverse proxy in front of it for TLS.
-The simplest option is Caddy, which gets you free automatic HTTPS:
+| Variable         | Default      | What it does |
+|------------------|--------------|--------------|
+| `ADMIN_PASSWORD` | *(required)* | Password for the single admin login. The app won't start without one, or with `changeme`. |
+| `BASE_URL`       | *(unset)*    | Public URL, e.g. `https://sign.example.com`. Used to build signing links; an `https://` URL also turns on secure cookies. |
+| `SMTP_HOST`      | *(unset)*    | SMTP server. Leave unset to send links yourself. Works with Gmail (app password), SendGrid, Mailgun, SES, Postmark, your own server… |
+| `SMTP_PORT`      | `587`        | 587/25 use STARTTLS automatically; 465 uses implicit TLS. |
+| `SMTP_SECURE`    | `false`      | Set `true` to force implicit TLS (automatic on port 465). |
+| `SMTP_USER`      | *(unset)*    | SMTP username, if your provider needs one. |
+| `SMTP_PASS`      | *(unset)*    | SMTP password, app password or API key. |
+| `SMTP_FROM`      | `SMTP_USER`  | From address on outgoing emails. |
+| `APP_NAME`       | `LiteSign`   | Name shown in emails ("Sent via …"). |
+| `TRUST_PROXY`    | `1`          | Reverse-proxy hops in front of the app. Needed for correct signer IPs and secure cookies. Set `0` if nothing is in front of it. |
+| `MAX_UPLOAD_MB`  | `25`         | Largest PDF you can upload. |
+| `SESSION_SECRET` | generated    | Cookie signing secret. Generated once and stored in the database if unset. |
+| `PORT`           | `8080`       | Port the app listens on inside the container. |
+| `DATA_DIR`       | `/app/data`  | Where the database and PDFs live. |
+
+## Putting it on the internet
+
+LiteSign is designed to be reachable by people outside your network, but it
+speaks plain HTTP, so put a reverse proxy with TLS in front of it. Caddy
+gets you automatic HTTPS in three lines:
 
 ```
-sign.yourdomain.com {
+sign.example.com {
   reverse_proxy litesign:8080
 }
 ```
 
-Set `BASE_URL=https://sign.yourdomain.com` so the links you email out are
-correct and secure cookies get enabled.
+Then set `BASE_URL=https://sign.example.com`. nginx, Traefik and
+Cloudflare Tunnel work just as well; keep `TRUST_PROXY` matched to the
+number of proxies in front of the app.
+
+Built in for internet-facing use:
+
+- Rate limiting on login and on the public signing endpoints.
+- A strict Content-Security-Policy and the usual security headers (via
+  `helmet`). Every script is served by the app itself: no inline scripts,
+  no CDNs, no third-party requests from your signers' browsers.
+- Cross-origin request blocking on the API, SameSite cookies, and a fresh
+  session on every login.
+- Strict validation of uploads, field positions and submitted signatures.
 
 ## Backups
 
-Everything durable lives under the `/app/data` volume:
-- `litesign.sqlite` — documents, signers, fields, audit log, login sessions
-- `files/` — original uploaded PDFs and completed signed PDFs
+Everything lives in the `/app/data` volume:
 
-Back it up with e.g.:
+- `litesign.sqlite`: documents, signers, fields, audit trail and sessions
+- `files/`: the uploaded originals and the completed, signed PDFs
+
 ```bash
-docker run --rm -v litesign_data:/data -v $(pwd):/backup alpine \
+docker run --rm -v litesign_data:/data -v "$(pwd)":/backup alpine \
   tar czf /backup/litesign-backup.tar.gz /data
 ```
 
-## No third-party requests
+Upgrading is `git pull && docker compose up -d --build`. The database
+upgrades itself on start-up.
 
-PDF.js (which renders documents in the browser) is installed from npm and
-served by the app itself, so neither you nor your signers' browsers load
-anything from a CDN. The container makes no outbound network calls at
-runtime other than SMTP.
+## Security model
 
-## Security notes
+- **One admin.** LiteSign is for an individual or team sending documents
+  out, not a multi-tenant service. There is a single admin password.
+- **The link is the key.** Each signer gets a link containing a random
+  192-bit token; whoever has the link can sign as that signer, so email
+  delivery is the access control (the same model as DocuSign and friends).
+  Links only work once a document is sent, and stop working if you cancel it.
+- **Health check.** `GET /healthz` returns `{"ok":true}` and is used by the
+  Docker health check.
 
-- Exactly one admin account, gated by `ADMIN_PASSWORD` — built for a single
-  team/individual sending documents out, not multi-tenant SaaS use.
-- Signing links contain a random 192-bit token; anyone with the link
-  can sign as that signer — email delivery is the access control. Public
-  signer endpoints are rate-limited, but treat links like you would a
-  DocuSign envelope link. Links only work once a document is sent, and
-  stop working if you cancel it.
-- No inbound-facing admin surface beyond the login page and the API, both
-  rate-limited; consider also putting basic IP allowlisting or a WAF in
-  front if your reverse proxy supports it, especially for `/login.html`.
-- This has not been audited for legal admissibility (eIDAS/ESIGN
-  compliance) in regulated industries — it captures signer name, drawn/typed
-  signature image, consent, timestamps, and IP address in an appended certificate
-  page and audit log, which covers most business use cases, but get your
-  own legal sign-off if this needs to hold up as evidence in court.
+## Is it legally binding?
+
+LiteSign captures what most e-signature tools capture: each signer's drawn
+or typed signature, their explicit consent to sign electronically,
+timestamps, IP addresses, an audit trail, and hashes of the original and
+final files. That is enough for most everyday business agreements in many
+places, but it hasn't been assessed against specific regimes such as
+eIDAS or ESIGN, and it isn't a "qualified" or certificate-based digital
+signature. If a document needs to stand up in court or in a regulated
+industry, check with a lawyer first.
 
 ## Development
 
@@ -162,12 +205,9 @@ ADMIN_PASSWORD=dev-password-123 BASE_URL=http://localhost:8080 npm start
 npm test   # end-to-end API tests against a throwaway data directory
 ```
 
-Requires Node.js 22 or newer.
+Requires Node.js 22 or newer. There is no frontend build step: plain HTML,
+CSS and ES modules in `public/`, with the server in `server/`.
 
-## Stack
-
-Node.js + Express 5, `better-sqlite3` (embedded, file-based), `pdf-lib` for
-stamping values into PDFs, `nodemailer` for SMTP, `multer` for uploads,
-`helmet` + `express-rate-limit` for internet-facing hardening, and
-`pdfjs-dist` for rendering in the browser. No frontend build step: plain
-HTML, CSS and ES modules.
+**Stack:** Node.js and Express 5, `better-sqlite3`, `pdf-lib` (stamping
+PDFs), `pdfjs-dist` (rendering in the browser), `nodemailer`, `multer`,
+`helmet` and `express-rate-limit`.

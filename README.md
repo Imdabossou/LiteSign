@@ -211,3 +211,9 @@ CSS and ES modules in `public/`, with the server in `server/`.
 **Stack:** Node.js and Express 5, `better-sqlite3`, `pdf-lib` (stamping
 PDFs), `pdfjs-dist` (rendering in the browser), `nodemailer`, `multer`,
 `helmet` and `express-rate-limit`.
+
+## Licence
+
+LiteSign is free software under the [GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later).
+You can use, change and share it, including commercially. If you share a changed version, or run one as a service
+that other people use over a network, you must make its source code available under the same licence.

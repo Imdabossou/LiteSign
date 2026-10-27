@@ -1,5 +1,7 @@
 # LiteSign
 
+<p align="center"><img src="docs/icon.png" width="128" alt="LiteSign icon"></p>
+
 **Self-hosted document signing that actually stays lightweight.** Upload a
 PDF, drop signature fields on it, and send it to people outside your
 organisation to sign in their browser. One container, one SQLite file, your

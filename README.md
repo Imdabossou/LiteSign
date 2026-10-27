@@ -1,6 +1,4 @@
-# LiteSign
-
-<img src="docs/icon.png" width="128" alt="LiteSign icon">
+# <img src="docs/icon.png" width="36" align="top" alt=""> LiteSign
 
 **Self-hosted document signing that actually stays lightweight.** Upload a
 PDF, drop signature fields on it, and send it to people outside your

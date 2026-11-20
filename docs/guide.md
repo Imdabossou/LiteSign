@@ -45,7 +45,7 @@ docker run -d \
 ## Sending documents
 
 <p>
-  <img src="screenshots/dashboard.png" width="385" alt="Dashboard listing documents that are drafts, out for signing and completed">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="screenshots/dashboard-dark.png"><img src="screenshots/dashboard.png" width="385" alt="Dashboard listing documents that are drafts, out for signing and completed"></picture>
   <img src="screenshots/completed-dark.png" width="385" alt="A completed document with both signatures stamped in, the download button and the audit trail (dark theme)">
 </p>
 

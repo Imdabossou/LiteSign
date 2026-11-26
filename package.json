@@ -1,6 +1,6 @@
 {
   "name": "litesign",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Lightweight self-hosted document signing",
   "main": "server/server.js",
   "scripts": {

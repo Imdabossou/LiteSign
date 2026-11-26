@@ -100,9 +100,10 @@ function renderFields() {
     box.setAttribute('role', 'button');
     box.setAttribute('aria-label', `${labelOf(f)}${values[f.id] ? ' (filled in)' : ''}`);
     placeBox(box, f);
-    if (values[f.id] && isImage(f) && SIGNATURE_DATA_URL.test(values[f.id])) {
+    const value = values[f.id];
+    if (value && isImage(f) && SIGNATURE_DATA_URL.test(value)) {
       const img = document.createElement('img');
-      img.src = values[f.id];
+      img.src = value;
       img.alt = labelOf(f);
       box.appendChild(img);
     } else {

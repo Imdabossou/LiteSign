@@ -85,6 +85,9 @@ function updateComplete() {
   $('completeBtn').disabled = remaining().length > 0 || !$('consent').checked;
 }
 
+// Only a drawn signature (a PNG data URL, the same pattern the server accepts) may become an image source.
+const SIGNATURE_DATA_URL = /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/;
+
 function renderFields() {
   document.querySelectorAll('.field-box').forEach(el => el.remove());
   for (const f of data.fields) {
@@ -97,7 +100,7 @@ function renderFields() {
     box.setAttribute('role', 'button');
     box.setAttribute('aria-label', `${labelOf(f)}${values[f.id] ? ' (filled in)' : ''}`);
     placeBox(box, f);
-    if (values[f.id] && isImage(f)) {
+    if (values[f.id] && isImage(f) && SIGNATURE_DATA_URL.test(values[f.id])) {
       const img = document.createElement('img');
       img.src = values[f.id];
       img.alt = labelOf(f);
